@@ -15,16 +15,12 @@ Why this matters for RAG:
   - Figures, tables, equations mixed with text
   - References section (dense, differently formatted)
 
-Dependencies:
-  pip install pymupdf   # PyMuPDF — best open-source PDF parser for layout
-
 Usage:
-  from pdf_parser import parse_pdf
-  doc = parse_pdf("attention_is_all_you_need.pdf")
-  print(doc["sections"])
+  uv run rag-parse paper.pdf
 """
 
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,14 +76,13 @@ class ParsedDocument:
 
 # ==================== CLEANING ====================
 
-# Common header/footer patterns in research papers
 HEADER_FOOTER_PATTERNS = [
     r'^[\d]+$',                                    # bare page numbers
     r'^page\s+\d+',                                # "Page 3"
     r'^\d+\s+of\s+\d+',                           # "3 of 12"
     r'^(proceedings|journal|conference|vol\.|arxiv)', # journal headers
-    r'^preprint',                                   # arXiv preprints
-    r'^under review',                               # submission headers
+    r'^preprint',
+    r'^under review',
     r'^\w+\s+et\s+al\.',                           # "Smith et al." running headers
 ]
 _header_footer_re = [re.compile(p, re.IGNORECASE) for p in HEADER_FOOTER_PATTERNS]
@@ -96,7 +91,7 @@ _header_footer_re = [re.compile(p, re.IGNORECASE) for p in HEADER_FOOTER_PATTERN
 def _is_header_footer(line: str) -> bool:
     """Detect if a line is likely a page header or footer."""
     line = line.strip()
-    if not line or len(line) > 150:  # headers/footers are short
+    if not line or len(line) > 150:
         return False
     return any(p.match(line) for p in _header_footer_re)
 
@@ -109,7 +104,7 @@ def _clean_text(text: str) -> str:
     # Collapse multiple newlines but preserve paragraph breaks
     text = re.sub(r'\n{3,}', '\n\n', text)
 
-    # Fix ligatures that PDF extractors sometimes miss
+    # Fix ligatures
     replacements = {
         'ﬁ': 'fi', 'ﬂ': 'fl', 'ﬀ': 'ff', 'ﬃ': 'ffi', 'ﬄ': 'ffl',
         '\u2019': "'", '\u2018': "'", '\u201c': '"', '\u201d': '"',
@@ -118,7 +113,7 @@ def _clean_text(text: str) -> str:
     for old, new in replacements.items():
         text = text.replace(old, new)
 
-    # Remove isolated single characters on their own line (often column artifacts)
+    # Remove isolated single characters on their own line (column artifacts)
     text = re.sub(r'\n[a-zA-Z]\n', '\n', text)
 
     return text.strip()
@@ -126,28 +121,23 @@ def _clean_text(text: str) -> str:
 
 # ==================== SECTION DETECTION ====================
 
-# Patterns for section headers in research papers
 SECTION_PATTERNS = [
-    # Numbered: "1. Introduction", "2.1 Background", "3.2.1 Details"
+    # Numbered: "1. Introduction", "2.1 Background"
     (re.compile(r'^(\d+(?:\.\d+)*)\s+([A-Z][^\n]{2,80})$', re.MULTILINE), None),
 
     # Roman numerals: "I. Introduction", "II. Related Work"
     (re.compile(r'^((?:I{1,3}|IV|VI{0,3}|IX|X{0,3}))\.\s+([A-Z][^\n]{2,80})$', re.MULTILINE), None),
 
-    # All-caps: "INTRODUCTION", "RELATED WORK" (common in IEEE format)
+    # All-caps: "INTRODUCTION", "RELATED WORK"
     (re.compile(r'^([A-Z][A-Z\s]{4,60})$', re.MULTILINE), "allcaps"),
 
-    # Abstract (special case — not always numbered)
+    # Abstract
     (re.compile(r'^(Abstract|ABSTRACT)\s*$', re.MULTILINE), "abstract"),
 ]
 
 
 def _detect_sections(text: str) -> list[dict]:
-    """
-    Find section boundaries in paper text.
-
-    Returns list of {title, level, start_pos} sorted by position.
-    """
+    """Find section boundaries in paper text."""
     found = []
 
     for pattern, ptype in SECTION_PATTERNS:
@@ -155,30 +145,25 @@ def _detect_sections(text: str) -> list[dict]:
             if ptype == "allcaps":
                 title = match.group(1).strip().title()
                 level = 1
-                start = match.start()
             elif ptype == "abstract":
                 title = "Abstract"
                 level = 1
-                start = match.start()
             else:
                 number = match.group(1)
                 title = match.group(2).strip()
-                level = number.count('.') + 1  # "2.1" → level 2
+                level = number.count('.') + 1
                 title = f"{number} {title}"
-                start = match.start()
 
-            # Skip very short "sections" (likely false positives)
             if len(title) < 3:
                 continue
 
-            found.append({"title": title, "level": level, "start": start})
+            found.append({"title": title, "level": level, "start": match.start()})
 
-    # Deduplicate overlapping matches (within 10 chars of each other)
+    # Deduplicate overlapping matches
     found.sort(key=lambda x: x["start"])
     deduped = []
     for item in found:
         if deduped and abs(item["start"] - deduped[-1]["start"]) < 10:
-            # Keep the one with more detail (longer title)
             if len(item["title"]) > len(deduped[-1]["title"]):
                 deduped[-1] = item
         else:
@@ -193,13 +178,7 @@ def parse_pdf(filepath: str | Path) -> ParsedDocument:
     """
     Parse a research paper PDF into structured sections.
 
-    Args:
-        filepath: path to PDF file
-
-    Returns:
-        ParsedDocument with extracted sections, metadata, and cleaned text
-
-    What this does:
+    Steps:
       1. Extract raw text page by page (PyMuPDF handles multi-column)
       2. Clean PDF artifacts (ligatures, hyphenation, headers/footers)
       3. Detect section boundaries using regex patterns
@@ -213,19 +192,17 @@ def parse_pdf(filepath: str | Path) -> ParsedDocument:
 
     doc = fitz.open(str(filepath))
 
-    # Step 1: Extract text page by page
+    # Extract text page by page
     page_texts = []
     for page_num in range(len(doc)):
         page = doc[page_num]
-        # "text" mode preserves reading order; "blocks" mode is layout-aware
         text = page.get_text("text")
         page_texts.append(text)
 
-    # Step 2: Clean each page, remove headers/footers
+    # Clean each page, remove headers/footers
     cleaned_pages = []
     for text in page_texts:
         lines = text.split('\n')
-        # Remove first and last 2 lines if they look like headers/footers
         filtered = []
         for i, line in enumerate(lines):
             if (i < 2 or i >= len(lines) - 2) and _is_header_footer(line):
@@ -233,14 +210,11 @@ def parse_pdf(filepath: str | Path) -> ParsedDocument:
             filtered.append(line)
         cleaned_pages.append('\n'.join(filtered))
 
-    # Step 3: Join all pages and clean
     full_text = _clean_text('\n\n'.join(cleaned_pages))
 
-    # Step 4: Extract metadata
+    # Metadata
     pdf_meta = doc.metadata or {}
     title = pdf_meta.get("title", "")
-
-    # Fallback: use first non-empty line as title if metadata is empty
     if not title:
         for line in full_text.split('\n'):
             line = line.strip()
@@ -248,21 +222,19 @@ def parse_pdf(filepath: str | Path) -> ParsedDocument:
                 title = line
                 break
 
-    # Step 5: Detect and extract sections
+    # Detect and extract sections
     section_markers = _detect_sections(full_text)
     sections = []
 
     if section_markers:
         for i, marker in enumerate(section_markers):
-            # Content = text from this marker to next marker (or end)
             start = marker["start"]
             end = section_markers[i + 1]["start"] if i + 1 < len(section_markers) else len(full_text)
 
-            # Skip the header line itself
             content_start = full_text.index('\n', start) + 1 if '\n' in full_text[start:end] else start
             content = full_text[content_start:end].strip()
 
-            # Figure out which pages this spans
+            # Page mapping
             char_count = 0
             page_start = 0
             page_end = 0
@@ -272,7 +244,7 @@ def parse_pdf(filepath: str | Path) -> ParsedDocument:
                 if char_count + len(pt) >= end:
                     page_end = pg_idx + 1
                     break
-                char_count += len(pt) + 2  # +2 for the \n\n join
+                char_count += len(pt) + 2
             else:
                 page_end = len(cleaned_pages)
 
@@ -284,7 +256,6 @@ def parse_pdf(filepath: str | Path) -> ParsedDocument:
                 page_end=page_end,
             ))
     else:
-        # No sections detected — treat entire text as one section
         sections.append(Section(
             title="Full Document",
             level=1,
@@ -310,7 +281,7 @@ def parse_pdf(filepath: str | Path) -> ParsedDocument:
     )
 
 
-# ==================== CONVENIENCE ====================
+# ==================== CLI ====================
 
 def print_structure(doc: ParsedDocument):
     """Print document structure overview."""
@@ -324,10 +295,10 @@ def print_structure(doc: ParsedDocument):
         print(f"  {indent}{s.title} ({len(s.content):,} chars, pp.{s.page_start}-{s.page_end})")
 
 
-if __name__ == "__main__":
-    import sys
+def main():
+    """Entry point for `uv run rag-parse <paper.pdf>`"""
     if len(sys.argv) < 2:
-        print("Usage: python pdf_parser.py <paper.pdf>")
+        print("Usage: uv run rag-parse <paper.pdf>")
         sys.exit(1)
     doc = parse_pdf(sys.argv[1])
     print_structure(doc)

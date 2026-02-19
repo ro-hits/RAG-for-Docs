@@ -2,33 +2,17 @@
 chunkers.py — Three Chunking Strategies for RAG
 ================================================
 
-Why chunking matters:
-  When you retrieve context for an LLM, you're retrieving CHUNKS, not
-  documents. The chunk is the atomic unit of your RAG system. Get it
-  wrong and everything downstream fails:
-
-  - Too small → chunks lack context, LLM can't form coherent answers
-  - Too large → irrelevant text dilutes the useful part, wastes tokens
-  - Bad boundaries → sentences cut mid-thought, tables split in half
-
-  There is no "best" chunking strategy. It depends on your documents
-  and your queries. That's why we build three and compare.
-
-Strategies implemented:
+Strategies:
   1. FixedSizeChunker    — split by character count with overlap
   2. SemanticChunker     — split at paragraph/sentence boundaries
   3. HierarchicalChunker — section-aware, preserves document structure
 
-Dependencies:
-  pip install sentence-transformers  (only for SemanticChunker)
+There is no "best" chunking strategy. It depends on your documents
+and your queries. That's why we build three and compare.
 """
 
 import re
 from dataclasses import dataclass, field
-
-# We'll import these lazily to avoid hard dependency
-# from sentence_transformers import SentenceTransformer
-# import numpy as np
 
 
 @dataclass
@@ -37,9 +21,6 @@ class Chunk:
     text: str
     chunk_id: int
     metadata: dict = field(default_factory=dict)
-    # metadata carries: section_title, page, strategy, char_count, etc.
-    # This travels with the chunk through embedding → storage → retrieval
-    # so the LLM knows WHERE this text came from.
 
     @property
     def char_count(self) -> int:
@@ -61,33 +42,23 @@ class FixedSizeChunker:
     """
     Split text into fixed-size chunks with overlap.
 
-    This is the simplest strategy and the one most tutorials use.
-    It's fast, predictable, and easy to reason about.
-
     HOW IT WORKS:
-      Text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-      chunk_size=10, overlap=3:
-        Chunk 1: "ABCDEFGHIJ"
-        Chunk 2: "HIJKLMNOPQ"  ← overlaps 3 chars with chunk 1
-        Chunk 3: "OPQRSTUVWX"
-        Chunk 4: "VWXYZ"
+      Text gets sliced every N characters. Overlap means the last M
+      characters of chunk N appear as the first M of chunk N+1.
 
     WHY OVERLAP:
-      Without overlap, if a key sentence spans the boundary between
-      two chunks, neither chunk has the full sentence. Overlap gives
-      you a buffer so boundary sentences appear in at least one chunk.
+      Without it, sentences at boundaries get split and neither chunk
+      has the full thought. Overlap is a band-aid, not a fix.
 
     WHEN IT FAILS:
-      - Cuts sentences mid-word ("The transformer architec" | "ture uses...")
+      - Cuts sentences mid-word
       - Splits tables, equations, code blocks
-      - A chunk might contain the end of one section and start of another
-        with zero topical coherence
-      - Wastes overlap tokens on repeated content
+      - Mixes content from different sections in one chunk
+      - Wastes tokens on repeated overlap content
 
     WHEN TO USE:
       - Quick baseline to compare against
-      - Documents with uniform density (no sections, no structure)
-      - When you need predictable chunk sizes for token budgets
+      - Documents with no structure (flat text)
     """
 
     def __init__(self, chunk_size: int = 1000, overlap: int = 200):
@@ -136,34 +107,21 @@ class SemanticChunker:
     """
     Split at natural boundaries — paragraphs first, then sentences.
 
-    Instead of arbitrarily cutting at N characters, this respects
-    the document's own structure: paragraph breaks are natural topic
-    boundaries.
-
     HOW IT WORKS:
       1. Split text into paragraphs (double newline)
       2. If a paragraph fits in max_chunk_size → it's a chunk
-      3. If too long → split into sentences, group sentences until
-         they'd exceed max_chunk_size
-      4. If a single sentence exceeds max_chunk_size → fall back to
-         fixed-size split on that sentence (rare, but handles it)
-
-    OPTIONALLY (if embedding model provided):
-      After basic splitting, merge adjacent chunks if their embeddings
-      are very similar (cosine > threshold). This recombines chunks
-      that were split but actually discuss the same topic.
+      3. If too long → split into sentences, group until limit
+      4. Tiny paragraphs get merged with neighbors
 
     WHY THIS IS BETTER THAN FIXED:
       - Never cuts mid-sentence
       - Respects paragraph boundaries (natural topic shifts)
       - Chunks have internal coherence
-      - Variable size — short paragraphs stay short, dense ones stay together
 
     WHEN IT FAILS:
       - Long paragraphs with multiple topics get lumped together
-      - Doesn't know about document structure (sections, subsections)
+      - Doesn't know about document structure (sections)
       - Paragraph detection fails on poorly formatted PDFs
-      - Sentence splitting fails on abbreviations ("Dr. Smith et al.")
     """
 
     def __init__(self, max_chunk_size: int = 1500, min_chunk_size: int = 100,
@@ -174,17 +132,31 @@ class SemanticChunker:
         self.similarity_threshold = similarity_threshold
 
     def _split_sentences(self, text: str) -> list[str]:
-        """Split text into sentences, handling abbreviations."""
-        # Negative lookbehind for common abbreviations
-        pattern = r'(?<!\b(?:Dr|Mr|Mrs|Ms|Prof|Sr|Jr|vs|al|etc|Fig|Eq|Sec|Vol))\.\s+'
-        parts = re.split(pattern, text)
-        # Re-add the period that was consumed by split
+        """Split into sentences, handling abbreviations."""
+        abbreviations = {"dr", "mr", "mrs", "ms", "prof", "sr", "jr",
+                         "vs", "al", "etc", "fig", "eq", "sec", "vol"}
+
+        # Split on period + whitespace
+        parts = re.split(r'\.\s+', text)
         sentences = []
+        buffer = ""
+
         for i, part in enumerate(parts):
-            if i < len(parts) - 1:
-                sentences.append(part.strip() + '.')
-            else:
-                sentences.append(part.strip())
+            buffer = f"{buffer}. {part}" if buffer else part
+
+            # Last part — flush
+            if i == len(parts) - 1:
+                sentences.append(buffer.strip())
+                break
+
+            # Check if this part ends with an abbreviation
+            last_word = part.strip().rsplit(None, 1)[-1].lower().rstrip('.') if part.strip() else ""
+            if last_word in abbreviations:
+                continue  # don't split here, keep buffering
+
+            sentences.append(buffer.strip() + '.')
+            buffer = ""
+
         return [s for s in sentences if s]
 
     def _split_paragraphs(self, text: str) -> list[str]:
@@ -200,7 +172,6 @@ class SemanticChunker:
 
         for para in paragraphs:
             if len(para) <= self.max_chunk_size:
-                # Paragraph fits — use it as-is
                 if len(para) >= self.min_chunk_size:
                     chunks.append(Chunk(
                         text=para,
@@ -209,7 +180,7 @@ class SemanticChunker:
                     ))
                     chunk_id += 1
                 elif chunks:
-                    # Too small — merge with previous chunk if it won't overflow
+                    # Too small — merge with previous if it fits
                     prev = chunks[-1]
                     merged = prev.text + "\n\n" + para
                     if len(merged) <= self.max_chunk_size:
@@ -220,15 +191,13 @@ class SemanticChunker:
                         )
                     else:
                         chunks.append(Chunk(
-                            text=para,
-                            chunk_id=chunk_id,
+                            text=para, chunk_id=chunk_id,
                             metadata={**metadata, "strategy": "semantic", "boundary": "paragraph"},
                         ))
                         chunk_id += 1
                 else:
                     chunks.append(Chunk(
-                        text=para,
-                        chunk_id=chunk_id,
+                        text=para, chunk_id=chunk_id,
                         metadata={**metadata, "strategy": "semantic", "boundary": "paragraph"},
                     ))
                     chunk_id += 1
@@ -240,7 +209,6 @@ class SemanticChunker:
 
                 for sent in sentences:
                     if current_len + len(sent) > self.max_chunk_size and current_group:
-                        # Flush current group
                         chunks.append(Chunk(
                             text=' '.join(current_group),
                             chunk_id=chunk_id,
@@ -251,9 +219,8 @@ class SemanticChunker:
                         current_len = 0
 
                     current_group.append(sent)
-                    current_len += len(sent) + 1  # +1 for space
+                    current_len += len(sent) + 1
 
-                # Flush remaining
                 if current_group:
                     chunks.append(Chunk(
                         text=' '.join(current_group),
@@ -287,7 +254,6 @@ class SemanticChunker:
             combined_len = len(merged[-1].text) + len(chunks[i].text)
 
             if sim >= self.similarity_threshold and combined_len <= self.max_chunk_size:
-                # Merge with previous
                 prev = merged[-1]
                 merged[-1] = Chunk(
                     text=prev.text + "\n\n" + chunks[i].text,
@@ -297,7 +263,6 @@ class SemanticChunker:
             else:
                 merged.append(chunks[i])
 
-        # Re-index
         for i, c in enumerate(merged):
             c.chunk_id = i
 
@@ -310,39 +275,22 @@ class HierarchicalChunker:
     """
     Section-aware chunking — preserves document structure.
 
-    This is the most sophisticated strategy for structured documents
-    like research papers. It understands that text within "2.1 Attention
-    Mechanism" is topically different from "3. Experiments" and should
-    never be combined.
-
-    HOW IT WORKS:
-      1. Take pre-detected sections from pdf_parser (Section objects)
-      2. For each section, chunk its content using SemanticChunker
-      3. Prepend section context to each chunk as a header
-      4. Each chunk carries its section lineage in metadata
-
     THE KEY INSIGHT:
       A chunk that says "The results show 95% accuracy" is useless
-      without knowing it came from "4.2 Ablation Study" in the paper.
-      Hierarchical chunking preserves this context.
+      without knowing it came from "4.2 Ablation Study".
+      Hierarchical chunking preserves this context by prepending
+      section headers.
 
-    WHAT GETS PREPENDED:
-      "[Section: 3 Experiments > 3.2 Ablation Study]
-       The results show 95% accuracy..."
-
-      This gives the embedding model AND the LLM context about where
-      this text came from, dramatically improving retrieval relevance.
+    HOW IT WORKS:
+      1. Take pre-detected sections from pdf_parser
+      2. Chunk each section's content using SemanticChunker
+      3. Prepend [Section: ...] header to each chunk
+      4. Section lineage travels in metadata
 
     WHEN TO USE:
       - Research papers (always)
-      - Technical documentation with clear hierarchy
+      - Technical docs with clear hierarchy
       - Legal documents with numbered sections
-      - Any document where section headers carry meaning
-
-    WHEN IT FAILS:
-      - Unstructured documents (blog posts, emails)
-      - When section detection is wrong (garbage sections = garbage chunks)
-      - Very short sections get tiny chunks (we handle via min_chunk_size)
     """
 
     def __init__(self, max_chunk_size: int = 1500, min_chunk_size: int = 100,
@@ -350,7 +298,6 @@ class HierarchicalChunker:
         self.max_chunk_size = max_chunk_size
         self.min_chunk_size = min_chunk_size
         self.include_context_header = include_context_header
-        # Use semantic chunker internally for within-section splitting
         self._inner_chunker = SemanticChunker(
             max_chunk_size=max_chunk_size,
             min_chunk_size=min_chunk_size,
@@ -362,7 +309,7 @@ class HierarchicalChunker:
 
         Args:
             sections: list of Section objects from pdf_parser
-            metadata: additional metadata to attach to all chunks
+            metadata: additional metadata for all chunks
         """
         metadata = metadata or {}
         all_chunks = []
@@ -372,10 +319,8 @@ class HierarchicalChunker:
             if not section.content.strip():
                 continue
 
-            # Build section context string
             context_header = f"[Section: {section.title}]"
 
-            # Chunk the section content
             section_meta = {
                 **metadata,
                 "strategy": "hierarchical",
@@ -388,7 +333,6 @@ class HierarchicalChunker:
             inner_chunks = self._inner_chunker.chunk(section.content, section_meta)
 
             for ic in inner_chunks:
-                # Prepend context header so embeddings capture section info
                 if self.include_context_header:
                     text_with_context = f"{context_header}\n{ic.text}"
                 else:
@@ -432,7 +376,6 @@ def print_comparison(strategies: dict[str, list[Chunk]]):
     print(f"{'CHUNKING STRATEGY COMPARISON':^70}")
     print(f"{'='*70}")
 
-    headers = ["Metric"] + list(strategies.keys())
     all_stats = {name: chunk_stats(chunks) for name, chunks in strategies.items()}
 
     metrics = ["count", "avg_chars", "avg_words", "min_chars", "max_chars", "std_chars", "total_chars"]
@@ -446,7 +389,6 @@ def print_comparison(strategies: dict[str, list[Chunk]]):
         "total_chars": "Total chars",
     }
 
-    # Print header
     col_width = max(18, max(len(n) for n in strategies.keys()) + 2)
     header_fmt = f"  {{:<20}}" + f"{{:>{col_width}}}" * len(strategies)
     print(header_fmt.format("Metric", *strategies.keys()))
@@ -458,11 +400,10 @@ def print_comparison(strategies: dict[str, list[Chunk]]):
 
     print()
 
-    # Show sample chunks from each strategy
     for name, chunks in strategies.items():
         if chunks:
             print(f"\n  Sample chunk from [{name}]:")
-            sample = chunks[min(2, len(chunks) - 1)]  # 3rd chunk usually more interesting
+            sample = chunks[min(2, len(chunks) - 1)]
             preview = sample.text[:300].replace('\n', '\n    ')
             print(f"    {preview}...")
             print(f"    → metadata: {sample.metadata}")

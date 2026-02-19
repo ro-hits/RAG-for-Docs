@@ -1,7 +1,31 @@
 [project]
-name = "rag-system"
+name = "rag-from-scratch"
 version = "0.1.0"
-description = "Add your description here"
+description = "RAG system built from scratch — no LangChain, no LlamaIndex"
 readme = "README.md"
-requires-python = ">=3.13"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "pymupdf>=1.25.0",                # PDF parsing
+    "sentence-transformers>=3.0.0",    # Embedding models (Module 2)
+    "faiss-cpu>=1.9.0",               # Vector storage (Module 2)
+    "rank-bm25>=0.2.2",              # Sparse retrieval (Module 3)
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ipython>=8.0",
+]
+
+[project.scripts]
+rag-parse = "rag.pdf_parser:main"
+rag-chunk = "rag.compare:main"
+rag-index = "rag.index_and_search:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag"]
