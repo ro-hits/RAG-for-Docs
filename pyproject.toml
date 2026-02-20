@@ -10,6 +10,8 @@ dependencies = [
     "faiss-cpu>=1.9.0",               # Vector storage (Module 2)
     "rank-bm25>=0.2.2",              # Sparse retrieval (Module 3)
     "numpy>=1.26.0",
+    "anthropic>=0.40.0",              # Claude API (Module 4)
+    "openai>=1.50.0",                # OpenAI-compat: GLM-5, DeepSeek, Ollama (Module 4)
 ]
 
 [project.optional-dependencies]
@@ -23,6 +25,8 @@ rag-parse = "rag.pdf_parser:main"
 rag-chunk = "rag.compare:main"
 rag-index = "rag.index_and_search:main"
 rag-search = "rag.hybrid:main"
+rag-ask = "rag.ask:main"
+rag-eval = "rag.evaluate:main"
 
 [build-system]
 requires = ["hatchling"]
