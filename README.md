@@ -8,7 +8,7 @@ A research paper Q&A system built piece by piece — no LangChain, no LlamaIndex
 uv sync
 ```
 
-That's it. `uv` handles the virtualenv, dependencies, everything.
+`uv` handles the virtualenv, dependencies, everything.
 
 ## Quick Start
 
@@ -41,10 +41,6 @@ uv run rag-eval papers\attention.pdf --model claude
 uv run rag-eval papers\attention.pdf --model claude --model deepseek
 ```
 
-**First time setup for generation:**
-```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-your-key-here"
-```
 
 ## Project Structure
 
